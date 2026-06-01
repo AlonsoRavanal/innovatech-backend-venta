@@ -1,0 +1,35 @@
+version: '3.8'
+services:
+  db:
+    image: mysql:8.0
+    container_name: test-db-ventas
+    environment:
+      MYSQL_ROOT_PASSWORD: root_pass
+      MYSQL_DATABASE: db_ventas
+    volumes:
+      - ventas-db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 5s
+      retries: 5
+
+  backend-ventas:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: test-backend-ventas
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_ENDPOINT=db
+      - DB_PORT=3306
+      - DB_NAME=db_ventas
+      - DB_USERNAME=root
+      - DB_PASSWORD=root_pass
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  ventas-db-data:
+    name: innovatech-ventas-db-data
