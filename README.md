@@ -1,6 +1,6 @@
 # 🛒 Innovatech Backend Ventas
 
-Microservicio REST desarrollado con **Spring Boot 3.4.4** para la gestión de ventas de la empresa Innovatech Chile. Forma parte de un sistema de microservicios junto a `innovatech-backend-despachos` y `innovatech-frontend-despacho`.
+Microservicio REST desarrollado con **Spring Boot 3.4.4** para la gestión de ventas de la empresa Innovatech Chile. Forma parte de un sistema de microservicios junto a `innovatech-backend-despachos` y `innovatech-frontend-despachos`.
 
 ---
 
@@ -15,6 +15,9 @@ Microservicio REST desarrollado con **Spring Boot 3.4.4** para la gestión de ve
 - [Endpoints disponibles](#endpoints-disponibles)
 - [Modelo de datos](#modelo-de-datos)
 - [Documentación Swagger](#documentación-swagger)
+- [Pipeline CI/CD](#-pipeline-cicd)
+- [Despliegue en Kubernetes](#-despliegue-en-kubernetes)
+- [Verificación y monitoreo del despliegue](#-verificación-y-monitoreo-del-despliegue)
 
 ---
 
@@ -30,6 +33,7 @@ Microservicio REST desarrollado con **Spring Boot 3.4.4** para la gestión de ve
 | SpringDoc OpenAPI (Swagger) | 2.7.0 |
 | Maven | 3.9.6 |
 | Docker | 20.x+ |
+| Kubernetes (K3s) | 1.x |
 
 ---
 
@@ -59,6 +63,25 @@ innovatech-backend-ventas/
 └── pom.xml
 ```
 
+Además, en el servidor de despliegue se mantiene un repositorio paralelo (`/repository/user7/EP3`) donde conviven los tres proyectos clonados junto con los manifiestos de Kubernetes:
+
+```
+/repository/user7/EP3/
+├── innovatech-backend-venta/
+├── innovatech-backend-despacho/
+├── innovatech-frontend-despachos/
+├── deployment.yaml
+├── frontend-deployment.yaml
+├── db-deployment.yaml
+├── service.yaml
+├── frontend-service.yaml
+├── pvc.yaml
+├── secrets.yaml
+├── hpa.yaml
+├── pipeline-local.sh
+└── README.md
+```
+
 ---
 
 ## ✅ Requisitos previos
@@ -72,15 +95,21 @@ Para ejecutar localmente sin Docker:
 - Maven 3.9+
 - MySQL 8.0 corriendo en `localhost:3306`
 
+Para desplegar en Kubernetes:
+- Clúster K3s local operativo (verificado mediante `kubectl config current-context`)
+- `kubectl` configurado con permisos suficientes (`kubectl auth can-i create deployments`)
+- Registro de imágenes local disponible en `localhost:5000`
+- MetalLB (o un proveedor de LoadBalancer equivalente) para exponer el frontend
+
 ---
 
 ## 🔐 Variables de entorno
 
-El servicio se configura mediante las siguientes variables de entorno definidas en el `docker-compose.yml`:
+El servicio se configura mediante las siguientes variables de entorno definidas en el `docker-compose.yml` (entorno local) o en los manifiestos de Kubernetes (entorno de clúster):
 
 | Variable | Descripción | Ejemplo |
 |---|---|---|
-| `DB_ENDPOINT` | Host de la base de datos | `db` (nombre del servicio Docker) |
+| `DB_ENDPOINT` | Host de la base de datos | `db` (Docker) / `db-ventas` (Kubernetes) |
 | `DB_PORT` | Puerto de MySQL | `3306` |
 | `DB_NAME` | Nombre de la base de datos | `db_ventas` |
 | `DB_USERNAME` | Usuario de la base de datos | `root` |
@@ -94,11 +123,13 @@ spring.datasource.username=${DB_USERNAME}
 spring.datasource.password=${DB_PASSWORD}
 ```
 
+En Kubernetes, `DB_USERNAME` y `DB_PASSWORD` no se definen como texto plano: se inyectan desde el recurso `Secret` `mysql-secrets` mediante `secretKeyRef`, evitando exponer credenciales en los manifiestos.
+
 ---
 
 ## 🐳 Ejecución con Docker
 
-Este es el método recomendado. Levanta el backend junto a su base de datos MySQL con un solo comando.
+Este es el método recomendado para desarrollo local. Levanta el backend junto a su base de datos MySQL con un solo comando.
 
 ### 1. Clonar el repositorio
 
@@ -279,3 +310,99 @@ El pipeline ejecuta los siguientes pasos:
 3. **Deploy** — despliega la imagen actualizada en la instancia EC2 correspondiente
 
 Las credenciales del registro de imágenes se gestionan como **GitHub Secrets** y nunca se exponen en el código.
+
+---
+
+## ☸️ Despliegue en Kubernetes
+
+Para desplegar la solución completa (dos backends, frontend y bases de datos) en un clúster K3s se elaboró un conjunto de manifiestos YAML declarativos, ubicados fuera de los directorios de cada proyecto, en la raíz del repositorio de trabajo (`/repository/user7/EP3`).
+
+### Recursos definidos
+
+| Archivo | Recurso(s) | Propósito |
+|---|---|---|
+| `deployment.yaml` | `Deployment` backend-venta / backend-despacho | Define imagen, réplicas, variables de entorno, límites de recursos y `readinessProbe` de ambos backends |
+| `frontend-deployment.yaml` | `Deployment` frontend-despachos | Define el contenedor del frontend (imagen, puerto 8080, límites de recursos) |
+| `db-deployment.yaml` | `Deployment` + `Service` mysql-ventas / mysql-despachos | Instancias MySQL independientes por dominio, con almacenamiento persistente |
+| `service.yaml` | `Service` (ClusterIP) backend-ventas / backend-despachos | Direcciones internas estables para la comunicación entre componentes |
+| `frontend-service.yaml` | `Service` (LoadBalancer) frontend-lb-svc | Expone el frontend hacia el exterior del clúster en el puerto 80 |
+| `pvc.yaml` | `PersistentVolumeClaim` mysql-ventas-pvc / mysql-despachos-pvc | Almacenamiento persistente (256Mi, `local-path`) para cada base de datos |
+| `secrets.yaml` | `Secret` mysql-secrets | Credenciales de base de datos (`db-user`, `db-pass`), inyectadas vía `secretKeyRef` |
+| `hpa.yaml` | `HorizontalPodAutoscaler` backend-venta-hpa / backend-despacho-hpa | Autoescalado de 1 a 3 réplicas por backend, con objetivo de 60% de uso de CPU |
+
+### Detalles de configuración
+
+- Cada backend expone su puerto de contenedor (`8080` para ventas, `8081` para despachos) enrutado internamente por su respectivo `Service` ClusterIP.
+- El frontend resuelve los backends mediante los nombres DNS internos que gestiona CoreDNS (`http://backend-ventas:8080`, `http://backend-despachos:8081`), sin depender de IPs dinámicas de pods.
+- El `Service` `frontend-lb-svc` (tipo `LoadBalancer`) escucha en el puerto estándar HTTP (80) y redirige al `targetPort: 8080` del contenedor del frontend.
+- Cada `Deployment` de backend define `resources.requests`/`limits` de CPU y memoria, además de un `readinessProbe` tipo `tcpSocket` antes de recibir tráfico.
+- Las credenciales de MySQL no se escriben en texto plano en los manifiestos de despliegue: se referencian desde el `Secret` `mysql-secrets`.
+
+### Automatización del despliegue: `pipeline-local.sh`
+
+Se desarrolló el script `pipeline-local.sh` para automatizar el ciclo completo de despliegue local:
+
+1. Construye las tres imágenes Docker (`backend-venta`, `backend-despacho`, `frontend-despachos`).
+2. Publica las imágenes en el registro local (`localhost:5000`).
+3. Aplica todos los manifiestos de Kubernetes mediante `kubectl apply` (`secrets.yaml`, `pvc.yaml`, `db-deployment.yaml`, `service.yaml`, `frontend-service.yaml`, `deployment.yaml`, `frontend-deployment.yaml`, `hpa.yaml`).
+4. Espera a que cada `Deployment` complete su rollout (`kubectl rollout status`).
+5. Muestra el estado final de Pods, Servicios, HPA y PVC.
+
+```bash
+chmod +x pipeline-local.sh
+./pipeline-local.sh
+```
+
+---
+
+## 🔎 Verificación y monitoreo del despliegue
+
+Comandos utilizados para validar que la infraestructura quedó completamente operativa:
+
+```bash
+# Contexto y permisos del clúster
+kubectl config current-context
+kubectl auth can-i create deployments
+
+# Estado general de los recursos
+kubectl get deploy,svc,hpa,pods -o wide
+
+# Prueba de acceso al frontend (IP externa provista por MetalLB)
+curl http://<IP-EXTERNA-FRONTEND>
+
+# Comunicación interna frontend → backends
+kubectl logs -f pod/<frontend-pod>
+
+# Logs de cada componente
+kubectl logs deploy/frontend-despachos --tail=30
+kubectl logs deploy/backend-venta --tail=30
+kubectl logs deploy/backend-despacho --tail=30
+
+# Historial de eventos del namespace
+kubectl get events --sort-by=.lastTimestamp
+
+# Métricas de consumo y autoescalado
+kubectl top pods
+kubectl get hpa
+kubectl describe hpa backend-venta
+kubectl describe hpa backend-despacho
+
+# Prueba de recuperación ante reinicio controlado
+kubectl rollout restart deployment/backend-venta
+kubectl rollout status deployment/backend-venta
+kubectl get pods
+```
+
+Para visualizar el frontend desde un equipo externo al servidor, se estableció un túnel SSH con reenvío de puertos:
+
+```bash
+ssh -L 8080:<IP-EXTERNA-FRONTEND>:80 usuario@servidor
+```
+
+Esto permite acceder a la aplicación en `http://localhost:8080` sin exponer directamente la red interna del servidor.
+
+Las pruebas funcionales realizadas confirmaron:
+- Creación de una venta vía Postman (`POST /api/v1/ventas` → `201 Created`).
+- Visualización de la venta creada desde el frontend.
+- Generación de un despacho asociado a la venta desde el frontend.
+- Confirmación del despacho creado consultando el backend de despachos vía Postman (`GET /api/v1/despachos` → `200 OK`).
